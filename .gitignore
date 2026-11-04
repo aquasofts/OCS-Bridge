@@ -1,0 +1,16 @@
+.tooling/
+.reference/
+.dart_tool/
+.flutter-plugins-dependencies
+build/
+dist/
+*.log
+*.user
+*.suo
+.idea/
+.vscode/
+coverage/
+windows/flutter/ephemeral/
+**/ephemeral/
+*.local.json
+*.iml

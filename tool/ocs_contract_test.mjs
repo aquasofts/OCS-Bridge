@@ -41,6 +41,17 @@ assert.equal(JSON.stringify(received.data.images), JSON.stringify(images));
 assert.equal(received.headers['X-OCS-Token'], 'contract-test-token-not-for-production');
 assert.equal(result[0].results[0].answer, 'Dart#Python');
 assert.equal(result[0].results[0].question, title);
+await defaultAnswerWrapperHandler(wrappers, {
+  title: '计算 https://example.test/formula.png',
+  options: 'https://example.test/option.png\n0',
+  type: 'single',
+  suggestion_title: '计算 [图片1]',
+  suggestion_options: '[图片2]\n0',
+  images: [...images, 'data:image/png;base64,AQ=='],
+});
+assert.equal(received.data.title, '计算 [图片1]');
+assert.equal(received.data.options, '[图片2]\n0');
+assert.equal(received.data.images.length, 2);
 const handler = new Function(wrappers[0].handler)();
 assert.equal(handler({ code: 0, answer: '' }), undefined);
 assert.throws(() => handler({ code: 502, message: 'error' }), /error/);

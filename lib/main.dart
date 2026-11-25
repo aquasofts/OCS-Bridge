@@ -8,6 +8,7 @@ import 'domain/config.dart';
 import 'services/config_store.dart';
 import 'services/app_log.dart';
 import 'services/interaction_audit.dart';
+import 'services/python_calculator.dart';
 import 'ui/app_shell.dart';
 import 'ui/components.dart';
 
@@ -24,7 +25,7 @@ void main(List<String> arguments) {
       }
       log.write('runtime', 'runtime.start', {
         'arguments': arguments,
-        'version': '0.2.2+5',
+        'version': '0.2.3+6',
         'os': Platform.operatingSystem,
         'osVersion': Platform.operatingSystemVersion,
         'dartVersion': Platform.version,
@@ -132,6 +133,43 @@ Future<void> _nativeSmokeTest(
   try {
     final store = await ConfigStore.open();
     await store.load();
+    if (PythonCalculator.isBundled) {
+      stage = 'bundled-python';
+      final python = PythonCalculator();
+      const budget = Duration(seconds: 5);
+      final results = await python.calculateBatch(
+        [
+          '0.1 + 0.2',
+          'sin(radians(30))',
+          'sqrt(72)',
+          'solve(x^2 - 5*x + 6)',
+          '1 / 0',
+        ],
+        budget,
+        log: log,
+      );
+      final values = results.map((item) => item.value).toList();
+      if (values[0] != '0.3' ||
+          values[1] != '0.5' ||
+          values[2] != '6*sqrt(2)' ||
+          results[2].approximation == null ||
+          values[3] != '{2, 3}' ||
+          values[4] != null) {
+        throw StateError('Bundled Python calculation mismatch');
+      }
+      final pending = python.calculate('1 + 1', budget, log: log);
+      python.cancelAll();
+      try {
+        await pending;
+        throw StateError('Bundled Python cancellation failed');
+      } on PythonUnavailable catch (error) {
+        if (error.message != '请求已取消') rethrow;
+      }
+      log.write('runtime', 'native.smoke.python', {
+        'results': values,
+        'cancelled': true,
+      });
+    }
     stage = 'vault-write';
     await secrets.write(id, 'native-smoke-placeholder');
     stage = 'vault-read';

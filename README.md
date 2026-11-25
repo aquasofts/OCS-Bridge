@@ -1,4 +1,4 @@
-# OCS Bridge 0.2.2
+# OCS Bridge 0.2.3
 
 Flutter Windows 题库桥接工具。参考 FlClash 的 Material 3 导航、卡片与过渡风格，界面以功能名和状态为主，未使用 FlClash 的源码或图标。
 
@@ -6,12 +6,20 @@ Flutter Windows 题库桥接工具。参考 FlClash 的 Material 3 导航、卡�
 
 解压完整发布包，运行 `ocs_bridge.exe`，保留旁边的 DLL 和 `data` 目录。
 
+模型报告不确定、解析出现不确定措辞或答案为空时，Bridge 会联网复核，搜索原题、相似题及知识点。`deepseek-flash` 的联网复核由 DeepSeek 官方服务端完成。其他模型优先使用自带搜索，必要时由 Bing 补查并交给原模型重新判断。“不确定时搜索 / 自动搜索 / 每题强制搜索”控制首次请求，后续仍会复核有疑问的答案。
+
+“设置 → Agent 模式”和“猜测模式”默认开启，可分别关闭，保存后重启保留。Agent 模式会把候选答案、原题、附图和已有工具结果交回模型复核，修正后的答案会再次核对。每个阶段最多复核三轮，并与联网、计算共享模型总超时。结果详情显示复核轮数和确认状态。设计参考 [Codex 的后续请求循环](https://github.com/openai/codex/blob/main/codex-rs/core/src/session/turn.rs) 和 [Claude Code 的验证循环](https://code.claude.com/docs/en/how-claude-code-works#the-agentic-loop)。
+
+猜测模式开启时，复核和检索后仍不能确定会标注“猜测 · 未核实”；关闭时返回空答案。猜测结果不缓存；缓存和在途请求按两个开关的状态隔离。停止服务会取消整个流程。
+
+独立搜索无需额外 Key，会将题干发送到 Bing，返回搜索结果链接和摘要；搜索结果是否真正支持答案由模型核对。搜索失败不会伪装为查到资料，关闭猜测时会保留未找到答案的结果。模型的未表达不确定性无法由程序直接读取，程序通过严格提示词、结构化标记及解析措辞识别。
+
 0.2.1 修复了 0.2.0 从资源管理器双击时可能立即闪退的问题：日志初始化不再调用要求控制台存在的 Flutter 输出流重建接口。
 
 0.2.2 遇到 TLS 连接失败、网络连接失败或连接中断时自动建立新连接重试，最多重连 3 次，依次等待 1、2、4 秒。重连与等待共享原有请求超时，不延长 OCS 所需超时；停止服务或退出时立即取消重连。鉴权、参数及响应格式错误不会自动重试。网络日志记录每次尝试及重连原因。
 
 1. **供应商**：填写 OpenAI、DeepSeek 或兼容服务的 Base URL 和 API Key。
-2. **模型**：手动添加，或获取供应商模型列表；单独设置供应商、协议、搜索、思考模式和深度、Token、温度、超时、图片及扩展参数。
+2. **模型**：手动添加，或获取供应商模型列表；单独设置供应商、协议、搜索、思考模式和深度、Token、温度、超时、图片输入、Python 计算及扩展参数。
 3. **概览**：选择当前模型并启动服务。
 4. **OCS 接入**：复制配置，在 OCS 题库配置中粘贴保存。
 5. OCS 的题库超时应大于模型超时至少 15 秒，并发不超过 4。
@@ -24,9 +32,13 @@ OCS 与本软件需在同一台电脑运行。脚本管理器需要允许访问 
 
 请求记录支持全部或单条导出，提供 JSON、CSV、TXT、Markdown，可只导出成功答案。CSV 使用 UTF-8 BOM，保留中文、换行和引号。导出文件由用户选择保存位置，不参与日志自动清理。
 
-Responses 会统计供应商返回的已完成搜索调用与网页读取；返回引用时可直接打开来源。DeepSeek 内置搜索使用 `deepseek-v4-pro` + Responses，Flash 的搜索组合会被拦截。
+DeepSeek V4.1 Flash（`deepseek-flash`）在 Chat Completions 和 Responses 中均支持原生网页搜索与链接读取，只需供应商的 DeepSeek API Key。开启思考模式可使用深度思考搜索。`deepseek-v4-pro` 可通过 Responses 使用原有搜索工具。[DeepSeek 官方联网工具文档](https://api-docs.deepseek.com/zh-cn/guides/web_tools/)
 
-能力由所选模型决定，开关不会为模型新增能力。DeepSeek Chat 搜索会被拒绝，应使用支持联网的 Responses 模型。OpenAI Responses 使用“思考深度”，思考模式保持默认。供应商可能忽略其不支持的参数。API 调用使用用户的供应商额度。
+为 `deepseek-flash` 选择“每题强制搜索”时，Bridge 会要求模型先联网，并检查返回的已完成调用。模型未执行联网时，Bridge 会提示错误。答题详情可查看搜索次数、网页读取次数及供应商返回的引用。API 调用使用用户的供应商额度。OpenAI Responses 使用“思考深度”，思考模式保持默认。
+
+- **图片题**：选择支持视觉的模型并开启“图片输入”。从 Bridge 重新复制题库配置到 OCS 并启用图片题优化。Bridge 接收题干和选项的附图，按 `[图片N]` 对应到原文。OCS 可据此还原带图答案。
+- **本机 Python 3**：在模型设置的“计算工具”中选择“本机 Python 3”。Windows x64 发行包自带 Python 和 SymPy，解压时请保留 `python` 目录。分数、根式和常见三角运算优先保留精确值，另支持排列组合及一元一次、二次实数方程。应用题、选项题和图片题由模型读题，每轮可一次提交最多 8 条算式，再根据结果作答。关闭联网和 Agent 复核时，题干只有基础算式的填空题可直接在本机作答，消耗 0 模型 token。
+- **备用计算工具**：“内置计算器”支持基础数值运算，无需 Python。“供应商托管 Python”需要 Responses 模型支持 Code Interpreter。结果详情会显示实际完成的调用次数。[OpenAI Code Interpreter 文档](https://developers.openai.com/api/docs/guides/tools-code-interpreter)
 
 ## 数据
 
@@ -71,13 +83,16 @@ dart run tool/export_wrapper.dart
 node tool/ocs_contract_test.mjs path/to/ocsjs
 ```
 
-真实接口验证使用进程环境变量 `OCS_TEST_API_KEY`、`OCS_TEST_BASE_URL`、`OCS_TEST_MODEL`，运行 `dart run tool/live_check.dart`。`OCS_TEST_MODE` 支持 `responses`、`chat`、`search`，`OCS_TEST_EFFORT` 指定深度。工具通过本机 OCS 接口调用生产请求链路，不打印密钥或上游错误正文。
+真实接口验证使用进程环境变量 `OCS_TEST_API_KEY`、`OCS_TEST_BASE_URL`、`OCS_TEST_MODEL`，运行 `dart run tool/live_check.dart`。测试 DeepSeek 时将 `OCS_TEST_PROVIDER_KIND` 设为 `deepseek`。`OCS_TEST_MODE` 支持 `responses`、`chat`、`search`（Responses 联网）和 `search-chat`（Chat Completions 联网），`OCS_TEST_EFFORT` 指定深度。工具通过本机 OCS 接口调用生产请求链路，不打印密钥或上游错误正文。
 
 原生自检：`ocs_bridge.exe --smoke-test`，验证配置读取、Windows 凭据读写删除、保存对话框初始化和首帧光栅化后退出；仅使用临时占位凭据。`--smoke-test-close` 还会走正常窗口关闭及日志落盘流程。`--diagnostics-crash-test` 在独立测试进程中产生受控原生异常以检查转储。显卡兼容启动：`ocs_bridge.exe --compat-renderer`。
 
 `tool/test-windows-startup.ps1 -Executable path/to/ocs_bridge.exe` 使用没有控制台的独立进程模拟资源管理器启动，分别验证隐藏自检和可见窗口自检。`--smoke-test-visible` 会显示真实窗口，确认首帧与窗口可见状态后正常关闭。
 
 ## 验证状态
+
+- 0.2.3 共 49 项 Flutter 测试通过，新增 13 项覆盖不确定性搜索、自带搜索优先及回退、猜测开关与持久化、缓存隔离、搜索失败/取消/超时、RSS 解析及设置界面。独立搜索已用真实 Bing 请求验证可返回结果；新增模型流程使用本机模拟供应商验证。
+- 0.2.3 Windows x64 Release 编译通过，发布目录隐藏启动自检通过（首帧光栅化、Windows 临时凭据读写删除、正常关闭）。
 
 - 36 项 Flutter 测试通过，覆盖协议参数、答案解析、供应商/模型 CRUD、弹窗生命周期、本机 HTTP、鉴权、缓存、搜索、七个页面、窗口宽度、明文点击/按键/密码/中文组合输入、网络头/长正文/分块/错误/关联 ID、24 小时清理、写入失败恢复、205 条记录重启恢复、四种导出格式及保存流程。
 - 0.2.2 增加 8 项自动重连回归测试：TLS / Socket / HTTP 中断后使用新连接恢复、三次重连上限、等待及连接期间取消、取消后新请求正常执行、共享总超时、鉴权及响应格式错误不重试。使用本机模拟供应商及注入的网络异常验证。

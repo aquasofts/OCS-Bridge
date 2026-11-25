@@ -223,6 +223,12 @@ Future<void> editModel(
   var effort = original?.effort ?? 'default',
       thinking = original?.thinking ?? 'default';
   var vision = original?.vision ?? false;
+  var calculation = original?.calculation ?? CalculationMode.off;
+  CalculationMode selectedCalculation() =>
+      calculation == CalculationMode.hostedPython &&
+          !supportsHostedPython(protocol, app.provider(provider)!)
+      ? CalculationMode.off
+      : calculation;
   var busy = false;
   String? error;
   final name = TextEditingController(text: original?.name ?? modelId ?? '');
@@ -287,6 +293,7 @@ Future<void> editModel(
                           effort: effort,
                           thinking: thinking,
                           vision: vision,
+                          calculation: selectedCalculation(),
                           maxTokens: int.tryParse(tokens.text) ?? 0,
                           timeoutSeconds: int.tryParse(timeout.text) ?? 0,
                           temperature: temp,
@@ -372,9 +379,9 @@ Future<void> editModel(
                           (v) => DropdownMenuItem(
                             value: v,
                             child: Text(switch (v) {
-                              SearchMode.off => '关闭',
-                              SearchMode.auto => '自动',
-                              SearchMode.required => '强制',
+                              SearchMode.off => '不确定时搜索',
+                              SearchMode.auto => '自动搜索',
+                              SearchMode.required => '每题强制搜索',
                             }),
                           ),
                         )
@@ -457,8 +464,46 @@ Future<void> editModel(
             SwitchListTile.adaptive(
               contentPadding: EdgeInsets.zero,
               title: const Text('图片输入'),
+              subtitle: const Text('读取 OCS 发送的题干和选项图片'),
               value: vision,
               onChanged: (v) => set(() => vision = v),
+            ),
+            DropdownButtonFormField<CalculationMode>(
+              key: ValueKey(selectedCalculation()),
+              initialValue: selectedCalculation(),
+              decoration: InputDecoration(
+                labelText: '计算工具',
+                helperText: switch (selectedCalculation()) {
+                  CalculationMode.localPython => '使用发行包自带的 Python，无需安装',
+                  CalculationMode.calculator => '适合基础数值运算',
+                  CalculationMode.hostedPython =>
+                    '需要 Responses 接口支持 Code Interpreter',
+                  CalculationMode.off => null,
+                },
+              ),
+              items: [
+                const DropdownMenuItem(
+                  value: CalculationMode.off,
+                  child: Text('关闭'),
+                ),
+                const DropdownMenuItem(
+                  value: CalculationMode.localPython,
+                  child: Text('本机 Python 3'),
+                ),
+                const DropdownMenuItem(
+                  value: CalculationMode.calculator,
+                  child: Text('内置计算器'),
+                ),
+                DropdownMenuItem(
+                  value: CalculationMode.hostedPython,
+                  enabled: supportsHostedPython(
+                    protocol,
+                    app.provider(provider)!,
+                  ),
+                  child: const Text('供应商托管 Python'),
+                ),
+              ],
+              onChanged: (v) => set(() => calculation = v!),
             ),
             ExpansionTile(
               tilePadding: EdgeInsets.zero,

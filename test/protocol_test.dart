@@ -4,9 +4,34 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:ocs_bridge/app_controller.dart';
 import 'package:ocs_bridge/domain/answer.dart';
 import 'package:ocs_bridge/domain/config.dart';
+import 'package:ocs_bridge/services/app_log.dart';
 import 'package:ocs_bridge/services/bridge_server.dart';
+import 'package:ocs_bridge/services/calculator.dart';
 import 'package:ocs_bridge/services/config_store.dart';
 import 'package:ocs_bridge/services/model_gateway.dart';
+import 'package:ocs_bridge/services/python_calculator.dart';
+
+class _TestPythonCalculator extends PythonCalculator {
+  final batches = <List<String>>[];
+
+  @override
+  Future<List<PythonCalculation>> calculateBatch(
+    List<String> expressions,
+    Duration budget, {
+    AppLog? log,
+  }) async {
+    batches.add(expressions);
+    return [
+      for (final expression in expressions)
+        switch (expression) {
+          '1/3' => (value: '1/3', approximation: null),
+          'sqrt(2)' => (value: 'sqrt(2)', approximation: '1.414213562373095'),
+          '0.1 + 0.2' => (value: '0.3', approximation: null),
+          _ => (value: null, approximation: null),
+        },
+    ];
+  }
+}
 
 class MemorySecrets implements SecretStore {
   final Map<String, String> values = {};
@@ -41,6 +66,30 @@ void main() {
     options: 'A. Dart\nB. Windows\nC. Python',
     type: 'multiple',
   );
+
+  test('legacy Python settings keep their original hosted mode', () {
+    const model = ModelConfig(
+      id: 'm',
+      name: 'Test',
+      model: 'm',
+      providerId: 'p',
+    );
+    final previous = model.toJson()..remove('calculation');
+    expect(ModelConfig.fromJson(previous).calculation, CalculationMode.off);
+    previous['python'] = true;
+    final migrated = ModelConfig.fromJson(previous);
+    expect(migrated.calculation, CalculationMode.hostedPython);
+    expect(
+      ModelConfig.fromJson(migrated.toJson()).calculation,
+      migrated.calculation,
+    );
+  });
+  test('built-in fallback rejects undefined intermediate results', () {
+    expect(calculate('-(2+3)^2 + sqrt(9)'), '-22');
+    expect(() => calculate('1/(1/0)'), throwsFormatException);
+    expect(() => calculate('sqrt(-1)^0'), throwsFormatException);
+    expect(() => calculate('print(1)'), throwsFormatException);
+  });
 
   test('Responses uses instructions, reasoning and required hosted search', () {
     const m = ModelConfig(
@@ -94,7 +143,7 @@ void main() {
     expect(request, isNot(contains('thinking')));
     expect(request, isNot(contains('store')));
   });
-  test('DeepSeek hosted search requires the supported Responses model', () {
+  test('DeepSeek V4 Pro keeps legacy search on Responses', () {
     const pro = ModelConfig(
       id: 'pro',
       name: 'Pro',
@@ -106,21 +155,47 @@ void main() {
     expect(buildRequest(pro, deepseek, question)['tools'], [
       {'type': 'web_search'},
     ]);
-    expect(
-      () => buildRequest(
-        const ModelConfig(
-          id: 'f',
-          name: 'Flash',
-          model: 'deepseek-flash',
-          providerId: 'd',
-          search: SearchMode.auto,
-        ),
-        deepseek,
-        question,
-      ),
-      throwsFormatException,
-    );
+    expect(buildRequest(pro, deepseek, question)['tool_choice'], 'required');
   });
+  for (final protocol in ApiProtocol.values) {
+    test('DeepSeek Flash declares native web tools on ${protocol.name}', () {
+      Map<String, dynamic> request(SearchMode search, {bool verify = false}) =>
+          buildRequest(
+            ModelConfig(
+              id: 'f',
+              name: 'Flash',
+              model: 'deepseek-flash',
+              providerId: 'd',
+              protocol: protocol,
+              search: search,
+              thinking: 'enabled',
+            ),
+            deepseek,
+            question,
+            requireHostedSearch: verify,
+          );
+
+      expect(request(SearchMode.off), isNot(contains('tools')));
+      for (final body in [
+        request(SearchMode.auto),
+        request(SearchMode.required),
+        request(SearchMode.off, verify: true),
+      ]) {
+        expect(body['tools'], [
+          {'type': 'deepseek_web_search'},
+          {'type': 'deepseek_read_url'},
+        ]);
+        expect(body, isNot(contains('web_search_options')));
+        expect(body, isNot(contains('tool_choice')));
+        if (protocol == ApiProtocol.chat) {
+          expect(body['thinking'], {'type': 'enabled'});
+        } else {
+          expect(body['reasoning'], {'effort': 'high'});
+        }
+      }
+      expect(jsonEncode(request(SearchMode.required)), contains('本题必须使用联网工具'));
+    });
+  }
   test(
     'incompatible search, capabilities and override attempts fail explicitly',
     () {
@@ -292,9 +367,17 @@ void main() {
   );
 
   group('real local HTTP integration', () {
+    const pythonModel = ModelConfig(
+      id: 'local-python',
+      name: 'Local Python',
+      model: 'local-python',
+      providerId: 'local',
+      calculation: CalculationMode.localPython,
+    );
     late HttpServer upstream;
     late ProviderConfig provider;
     late ModelGateway gateway;
+    late _TestPythonCalculator python;
     var calls = 0;
     late List<Map<String, dynamic>> requests;
     setUp(() async {
@@ -306,7 +389,8 @@ void main() {
         name: 'Mock',
         baseUrl: 'http://127.0.0.1:${upstream.port}/v1',
       );
-      gateway = ModelGateway();
+      python = _TestPythonCalculator();
+      gateway = ModelGateway(python: python);
       upstream.listen((req) async {
         calls++;
         expect(req.headers.value('Authorization'), 'Bearer test-secret');
@@ -330,6 +414,13 @@ void main() {
             req.response.statusCode = 401;
             req.response.write('{"error":"test-secret should not appear"}');
           } else if (req.uri.path.endsWith('/responses')) {
+            final calculation = body['model'] == 'local-calculation';
+            final hasResult = (body['instructions'] as String).contains(
+              '"结果":"4280995423"',
+            );
+            final hasPythonResult = (body['instructions'] as String).contains(
+              '"sqrt(2)":"sqrt(2) ≈ 1.414213562373095"',
+            );
             req.response.write(
               jsonEncode({
                 'status': 'completed',
@@ -338,12 +429,26 @@ void main() {
                   if (body['model'] != 'no-search')
                     {'type': 'web_search_call', 'status': 'completed'},
                   {'type': 'web_search_call', 'status': 'failed'},
+                  if (body['model'] == 'vision-python') ...[
+                    {'type': 'code_interpreter_call', 'status': 'completed'},
+                    {'type': 'code_interpreter_call', 'status': 'failed'},
+                  ],
                   {
                     'type': 'message',
                     'content': [
                       {
                         'type': 'output_text',
-                        'text': '{"answers":["A","C"],"explanation":"已验证"}',
+                        'text': switch (body['model']) {
+                          'vision-python' =>
+                            '{"answers":["[图片3]"],"explanation":"计算得 6"}',
+                          'local-python' when !hasPythonResult =>
+                            '{"calculate":["1/3","sqrt(2)","1/0"," 1/3 "]}',
+                          'local-python' => '{"answers":["1/3","sqrt(2)"]}',
+                          _ when calculation && !hasResult =>
+                            '{"calculate":"73649 * 58127"}',
+                          _ when calculation => '{"answers":["4280995423"]}',
+                          _ => '{"answers":["A","C"],"explanation":"已验证"}',
+                        },
                         'annotations': [
                           {
                             'type': 'url_citation',
@@ -490,6 +595,70 @@ void main() {
       }
     });
     test(
+      'local calculator returns real results without upstream tools',
+      () async {
+        final result = await gateway.answer(
+          const ModelConfig(
+            id: 'calc',
+            name: 'Calc',
+            model: 'local-calculation',
+            providerId: 'local',
+            calculation: CalculationMode.calculator,
+          ),
+          provider,
+          'test-secret',
+          const Question(title: '73649 × 58127', type: 'completion'),
+        );
+        expect(result.ocsAnswer, (73649 * 58127).toString());
+        expect(result.calculationCalls, 1);
+        expect(result.pythonCalls, 0);
+        expect(result.inputTokens, 20);
+        expect(requests, hasLength(2));
+        expect(requests.every((body) => !body.containsKey('tools')), isTrue);
+      },
+    );
+    test(
+      'local Python sends a deduplicated batch and finishes in two requests',
+      () async {
+        final result = await gateway.answer(
+          pythonModel,
+          provider,
+          'test-secret',
+          const Question(title: '分别计算三分之一和 2 的平方根', type: 'completion'),
+        );
+        expect(result.answers, ['1/3', 'sqrt(2)']);
+        expect(result.pythonCalls, 2);
+        expect(result.inputTokens, 20);
+        expect(requests, hasLength(2));
+        expect(python.batches, [
+          ['1/3', 'sqrt(2)', '1/0'],
+        ]);
+        expect(requests.last['instructions'], contains('"1/3":"1/3"'));
+        expect(
+          requests.last['instructions'],
+          contains(PythonCalculator.invalidExpression),
+        );
+      },
+    );
+    test(
+      'bare arithmetic completion is answered without a model request',
+      () async {
+        final result = await gateway.answer(
+          pythonModel,
+          provider,
+          'test-secret',
+          const Question(title: '0.1 + 0.2 = ___', type: 'completion'),
+        );
+        expect(result.answers, ['0.3']);
+        expect(result.pythonCalls, 1);
+        expect(result.inputTokens + result.outputTokens, 0);
+        expect(requests, isEmpty);
+        expect(python.batches, [
+          ['0.1 + 0.2'],
+        ]);
+      },
+    );
+    test(
       'OCS to bridge to model returns answer, auth failures and cache behavior',
       () async {
         final dir = await Directory.systemTemp.createTemp('ocs-integration-');
@@ -508,6 +677,7 @@ void main() {
           ],
           activeModelId: 'r',
           token: newToken(),
+          agentMode: false,
         );
         final app = AppController(
           config: config,
@@ -570,9 +740,54 @@ void main() {
         expect(calls, 2);
         expect(requests.last, contains('messages'));
         final wrappers = ocsWrappers(bridge.port, config.token);
-        expect(wrappers.first['data']['title'], r'${title}');
         expect(wrappers.first['headers']['X-OCS-Token'], config.token);
         expect(jsonEncode(wrappers), isNot(contains('test-secret')));
+
+        const vision = ModelConfig(
+          id: 'visual',
+          name: 'Vision & Python',
+          model: 'vision-python',
+          providerId: 'local',
+          vision: true,
+          calculation: CalculationMode.hostedPython,
+        );
+        config.models.add(ModelConfig.fromJson(vision.toJson()));
+        config.activeModelId = vision.id;
+        const pictured = Question(
+          title: '计算 [图片1] 的结果',
+          options: 'A. [图片2]\nB. [图片3]',
+          type: 'single',
+          images: [
+            'data:image/png;base64,AA==',
+            'data:image/png;base64,AQ==',
+            'data:image/png;base64,Ag==',
+          ],
+        );
+        final visualResult = await post(config.token, pictured.toJson());
+        expect(visualResult.$1, 200);
+        expect(visualResult.$2['answer'], '[图片3]');
+        expect(visualResult.$2['pythonCalls'], 1);
+        expect(requests.last['tools'], [
+          {
+            'type': 'code_interpreter',
+            'container': {'type': 'auto'},
+          },
+        ]);
+        final parts =
+            (requests.last['input'] as List).single['content'] as List;
+        expect(
+          jsonDecode(parts.first['text'] as String)['选项'],
+          pictured.options,
+        );
+        expect(parts.skip(1).map((part) => part['image_url']), pictured.images);
+        final forcedSearch = buildRequest(
+          vision,
+          provider,
+          pictured,
+          requireHostedSearch: true,
+        );
+        expect(forcedSearch['tool_choice'], {'type': 'web_search'});
+        expect(forcedSearch['tools'], hasLength(2));
       },
     );
   });

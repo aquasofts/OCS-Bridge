@@ -16,8 +16,10 @@ class FixedGateway extends ModelGateway {
     ModelConfig m,
     ProviderConfig p,
     String key,
-    Question q,
-  ) async => const AnswerResult(
+    Question q, {
+    bool allowGuess = false,
+    bool agentMode = false,
+  }) async => const AnswerResult(
     answers: ['原文，"答案"\n第二行'],
     explanation: '解析原文',
     inputTokens: 8,

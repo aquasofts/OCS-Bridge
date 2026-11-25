@@ -17,8 +17,11 @@ List<Map<String, dynamic>> ocsWrappers(int port, String token) => [
     'responseType': 'json',
     'headers': {'Content-Type': 'application/json', 'X-OCS-Token': token},
     'data': {
-      'title': r'${title}',
-      'options': r'${options}',
+      'title': {'handler': 'return (env) => env.suggestion_title || env.title'},
+      'options': {
+        'handler':
+            'return (env) => env.suggestion_options || env.options || ""',
+      },
       'type': r'${type}',
       'images': {'handler': 'return (env) => env.images || []'},
     },
@@ -190,6 +193,11 @@ class BridgeServer {
         'answers': result.answers,
         'explanation': result.explanation,
         'sources': result.sources,
+        'pythonCalls': result.pythonCalls,
+        'calculationCalls': result.calculationCalls,
+        'reviewRounds': result.reviewRounds,
+        'reviewed': result.reviewed,
+        'isGuess': result.isGuess,
       });
     } on FormatException catch (e, stack) {
       log?.error('bridge.format.error', e, stack, {'requestId': id});

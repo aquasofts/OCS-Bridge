@@ -183,7 +183,7 @@ class _AppShellState extends State<AppShell> {
                   Padding(
                     padding: const EdgeInsets.only(top: 14),
                     child: Text(
-                      'WINDOWS  /  0.2.2',
+                      'WINDOWS  /  0.2.3',
                       style: TextStyle(
                         fontFamily: 'Consolas',
                         fontSize: 10,

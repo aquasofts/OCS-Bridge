@@ -7,9 +7,96 @@ import 'package:ocs_bridge/domain/answer.dart';
 import 'package:ocs_bridge/services/app_log.dart';
 import 'package:ocs_bridge/services/config_store.dart';
 import 'package:ocs_bridge/services/model_gateway.dart';
+import 'package:ocs_bridge/services/question_search.dart';
 import 'protocol_test.dart' show MemorySecrets;
 
 void main() {
+  test(
+    'independent search keeps response bytes when a connection drops',
+    () async {
+      final temp = await Directory.systemTemp.createTemp('ocs-search-log-');
+      final log = AppLog();
+      await log.initialize(temp);
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(() async {
+        await server.close(force: true);
+        await log.close();
+        await temp.delete(recursive: true);
+      });
+      final partial = utf8.encode('<rss>部分正文');
+      const rss =
+          '<rss><channel><item><title>完整结果</title>'
+          '<link>https://example.test/answer</link></item></channel></rss>';
+      server.listen((request) async {
+        if (request.uri.queryParameters['q']!.startsWith('"')) {
+          final socket = await request.response.detachSocket(
+            writeHeaders: false,
+          );
+          socket.write(
+            'HTTP/1.1 200 OK\r\nX-Search: partial\r\n'
+            'Content-Length: ${partial.length + 30}\r\nConnection: close\r\n\r\n',
+          );
+          socket.add(partial);
+          await socket.flush();
+          socket.destroy();
+        } else {
+          request.response.headers.contentType = ContentType(
+            'application',
+            'rss+xml',
+            charset: 'utf-8',
+          );
+          request.response.write(rss);
+          await request.response.close();
+        }
+      });
+      final gateway = ModelGateway(
+        questionSearch: QuestionSearch(
+          searchEndpoint: Uri.parse('http://127.0.0.1:${server.port}/search'),
+        ),
+      )..log = log;
+      final result = await gateway.questionSearch.search(
+        const Question(title: '测试题'),
+        const Duration(seconds: 4),
+      );
+      expect(result.calls, 1);
+      expect(result.hits.single.title, '完整结果');
+
+      final network = await log.read('network');
+      final runtime = await log.read('runtime');
+      final failed =
+          runtime.singleWhere(
+                (e) => e['event'] == 'question.search.error',
+              )['data']
+              as Map;
+      Iterable<Map> entries(String event) => network
+          .where((e) => e['event'] == event)
+          .map((e) => e['data'] as Map);
+      final requestId = failed['requestId'];
+      Map interrupted(String event) =>
+          entries(event).singleWhere((e) => e['requestId'] == requestId);
+      expect(interrupted('question.search.start')['method'], 'GET');
+      expect(
+        (interrupted('question.search.request.ready')['headers']
+            as Map)['accept'],
+        ['application/rss+xml, application/xml'],
+      );
+      expect(
+        (interrupted('question.search.response.headers')['headers']
+            as Map)['x-search'],
+        ['partial'],
+      );
+      final received = entries('question.search.response.chunk')
+          .where((e) => e['requestId'] == requestId)
+          .expand((e) => base64Decode((e['body'] as Map)['base64'] as String));
+      expect(received, partial);
+      expect(failed['receivedBytes'], partial.length);
+      expect(
+        (entries('question.search.response').single['body'] as Map)['utf8'],
+        rss,
+      );
+    },
+  );
+
   test(
     'all application HTTP headers, bodies, chunks and errors are logged without redaction',
     () async {
@@ -68,6 +155,7 @@ void main() {
         models: [model],
         activeModelId: 'm',
         token: newToken(),
+        agentMode: false,
       );
       final secrets = AuditedSecrets(MemorySecrets(), log);
       await secrets.write('local', key);

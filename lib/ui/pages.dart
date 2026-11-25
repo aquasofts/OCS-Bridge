@@ -20,13 +20,15 @@ void message(BuildContext context, String text) {
 
 Future<void> guarded(
   BuildContext context,
-  Future<void> Function() action,
-) async {
+  Future<void> Function() action, {
+  String errorEvent = 'ui.action.error',
+  Map<String, dynamic> errorData = const {},
+}) async {
   final log = AuditScope.of(context);
   try {
     await action();
   } catch (e, stack) {
-    log?.error('ui.action.error', e, stack);
+    log?.error(errorEvent, e, stack, errorData);
     if (context.mounted) {
       message(context, errorLabel(e));
     }
@@ -793,15 +795,46 @@ class ResultView extends StatelessWidget {
                 (url) => ActionChip(
                   avatar: const Icon(Icons.open_in_new_rounded, size: 14),
                   label: Text(Uri.parse(url).host),
-                  onPressed: () => launchUrl(Uri.parse(url)),
+                  onPressed: () => guarded(
+                    context,
+                    () async {
+                      final log = AuditScope.of(context);
+                      final opened = await launchUrl(Uri.parse(url));
+                      log?.write('interaction', 'answer.source.open.complete', {
+                        'url': url,
+                        'opened': opened,
+                      });
+                    },
+                    errorEvent: 'answer.source.open.error',
+                    errorData: {'url': url, 'opened': false},
+                  ),
                 ),
               )
               .toList(),
         ),
+      if (result.isGuess)
+        const Badge('猜测 · 未核实', icon: Icons.help_outline_rounded),
       if (result.searchCalls > 0)
         Badge('搜索 ${result.searchCalls} 次', icon: Icons.travel_explore_rounded),
       if (result.pageReads > 0)
         Badge('读取 ${result.pageReads} 页', icon: Icons.article_outlined),
+      if (result.pythonCalls > 0)
+        Badge(
+          'Python 计算 ${result.pythonCalls} 次',
+          icon: Icons.calculate_outlined,
+        ),
+      if (result.calculationCalls > 0)
+        Badge(
+          '内置计算 ${result.calculationCalls} 次',
+          icon: Icons.calculate_outlined,
+        ),
+      if (result.reviewRounds > 0)
+        Badge(
+          result.reviewed
+              ? 'Agent 复核通过 · ${result.reviewRounds} 轮'
+              : 'Agent 复核未确认 · ${result.reviewRounds} 轮',
+          icon: Icons.fact_check_outlined,
+        ),
     ],
   );
 }
@@ -821,7 +854,9 @@ Future<void> showHelp(BuildContext context) => appDialog<void>(
         Text('4. 在 OCS 的题库配置中粘贴并保存。'),
         Text('5. 将 OCS 题库超时调至大于模型超时。'),
         Text('连接失败：允许脚本访问 127.0.0.1，并检查浏览器的本地网络访问权限。'),
-        Text('搜索、图片和思考深度需由模型及供应商实际支持。'),
+        Text('不确定时优先使用模型自带搜索；不可用或仍未解决时独立搜索原题和相似题。'),
+        Text('Agent 模式和猜测模式默认开启，可在设置中分别关闭。猜测会明确标注。'),
+        Text('图片和思考深度需由模型及供应商实际支持。'),
       ],
     ),
   ),
@@ -846,12 +881,23 @@ class ConnectionPage extends StatelessWidget {
               ),
               const Spacer(),
               FilledButton.icon(
-                onPressed: () => guarded(context, () async {
-                  await Clipboard.setData(ClipboardData(text: app.wrapperJson));
-                  if (context.mounted) {
-                    message(context, '已复制');
-                  }
-                }),
+                onPressed: () async {
+                  final text = app.wrapperJson;
+                  await guarded(
+                    context,
+                    () async {
+                      await Clipboard.setData(ClipboardData(text: text));
+                      app.log?.write('interaction', 'ocs.config.copy.complete', {
+                        'text': text,
+                      });
+                      if (context.mounted) {
+                        message(context, '已复制');
+                      }
+                    },
+                    errorEvent: 'ocs.config.copy.error',
+                    errorData: {'text': text},
+                  );
+                },
                 icon: const Icon(Icons.copy_rounded, size: 16),
                 label: const Text('复制配置'),
               ),
@@ -1272,6 +1318,19 @@ class SettingsPage extends StatelessWidget {
           const Divider(),
           SwitchListTile.adaptive(
             contentPadding: EdgeInsets.zero,
+            secondary: const Icon(Icons.fact_check_outlined),
+            title: const Text('Agent 模式'),
+            subtitle: const Text('默认开启 · 对照原题和工具结果复核，修正后再检查'),
+            value: app.config.agentMode,
+            onChanged: (v) => guarded(context, () async {
+              app.config.agentMode = v;
+              app.clearCache();
+              await app.save();
+            }),
+          ),
+          const Divider(),
+          SwitchListTile.adaptive(
+            contentPadding: EdgeInsets.zero,
             secondary: const Icon(Icons.play_circle_outline_rounded),
             title: const Text('打开软件时启动服务'),
             value: app.config.autoStart,
@@ -1291,6 +1350,26 @@ class SettingsPage extends StatelessWidget {
               if (!v) {
                 app.clearCache();
               }
+              await app.save();
+            }),
+          ),
+          const Divider(),
+          ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: const Icon(Icons.travel_explore_rounded),
+            title: const Text('不确定时联网搜索'),
+            subtitle: const Text('优先使用模型自带搜索，再补查原题和相似题，始终启用'),
+          ),
+          const Divider(),
+          SwitchListTile.adaptive(
+            contentPadding: EdgeInsets.zero,
+            secondary: const Icon(Icons.help_outline_rounded),
+            title: const Text('猜测模式'),
+            subtitle: const Text('默认开启 · 搜索后仍不能确定时返回并标注猜测'),
+            value: app.config.allowGuess,
+            onChanged: (v) => guarded(context, () async {
+              app.config.allowGuess = v;
+              app.clearCache();
               await app.save();
             }),
           ),
@@ -1397,7 +1476,7 @@ class SettingsPage extends StatelessWidget {
             contentPadding: EdgeInsets.zero,
             leading: Icon(Icons.bolt_rounded),
             title: Text('OCS Bridge'),
-            trailing: Text('0.2.2'),
+            trailing: Text('0.2.3'),
           ),
         ],
       ),

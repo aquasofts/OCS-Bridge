@@ -283,8 +283,20 @@ class AppController extends ChangeNotifier {
       'provider': p.toJson(),
     });
     final timer = Stopwatch()..start();
+    final allowGuess = config.allowGuess;
+    final agentMode = config.agentMode;
     final cacheKey = sha256
-        .convert(utf8.encode(jsonEncode([m.toJson(), p.toJson(), q.toJson()])))
+        .convert(
+          utf8.encode(
+            jsonEncode([
+              m.toJson(),
+              p.toJson(),
+              q.toJson(),
+              allowGuess,
+              agentMode,
+            ]),
+          ),
+        )
         .toString();
     var cached = false;
     pending++;
@@ -318,7 +330,14 @@ class AppController extends ChangeNotifier {
             if (key.isEmpty) {
               throw const GatewayException('请设置 API Key');
             }
-            return gateway.answer(m, p, key, q);
+            return gateway.answer(
+              m,
+              p,
+              key,
+              q,
+              allowGuess: allowGuess,
+              agentMode: agentMode,
+            );
           })();
           _inflight[cacheKey] = work;
           try {
@@ -327,7 +346,10 @@ class AppController extends ChangeNotifier {
             _inflight.remove(cacheKey);
           }
         }
-        if (config.cacheEnabled && result.answers.isNotEmpty) {
+        if (config.cacheEnabled &&
+            result.answers.isNotEmpty &&
+            !result.isGuess &&
+            !result.needsSearch) {
           _cache[cacheKey] = result;
           audit('answer.cache.saved', {
             'requestId': requestId,

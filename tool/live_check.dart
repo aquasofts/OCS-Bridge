@@ -28,13 +28,15 @@ Future<void> main() async {
     ),
   );
   final mode = env['OCS_TEST_MODE'] ?? 'responses';
+  final search = mode == 'search' || mode == 'search-chat';
+  final chat = mode == 'chat' || mode == 'search-chat';
   final model = ModelConfig(
     id: 'live',
     name: modelId,
     model: modelId,
     providerId: provider.id,
-    protocol: mode == 'chat' ? ApiProtocol.chat : ApiProtocol.responses,
-    search: mode == 'search' ? SearchMode.required : SearchMode.off,
+    protocol: chat ? ApiProtocol.chat : ApiProtocol.responses,
+    search: search ? SearchMode.required : SearchMode.off,
     effort: env['OCS_TEST_EFFORT'] ?? 'low',
     thinking: env['OCS_TEST_THINKING'] ?? 'default',
     maxTokens: 2048,
@@ -72,12 +74,8 @@ Future<void> main() async {
     request.headers.set('X-OCS-Token', token);
     request.write(
       jsonEncode({
-        'title': mode == 'search'
-            ? '请联网查看 Flutter 官方文档，Flutter 是由哪家公司发起的？'
-            : '1 + 1 = ？',
-        'options': mode == 'search'
-            ? 'A. Google\nB. Apple'
-            : 'A. 1\nB. 2\nC. 3',
+        'title': search ? '请联网查看 Flutter 官方文档，Flutter 是由哪家公司发起的？' : '1 + 1 = ？',
+        'options': search ? 'A. Google\nB. Apple' : 'A. 1\nB. 2\nC. 3',
         'type': 'single',
       }),
     );
@@ -89,11 +87,11 @@ Future<void> main() async {
       }
       throw const GatewayException('Bridge did not return an answer');
     }
-    final expected = mode == 'search' ? 'Google' : '2';
+    final expected = search ? 'Google' : '2';
     if (body['answer'] != expected) {
       throw const GatewayException('Unexpected answer');
     }
-    if (mode == 'search' && result!.searchCalls + result!.pageReads < 1) {
+    if (search && result!.searchCalls + result!.pageReads < 1) {
       throw const GatewayException(
         'Provider did not confirm a completed search',
       );

@@ -110,6 +110,96 @@ void main() {
     },
   );
 
+  testWidgets('clipboard and source links audit their payload and outcome', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1180, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final messenger = tester.binding.defaultBinaryMessenger;
+    const launcher = MethodChannel('plugins.flutter.io/url_launcher');
+    final clipboard = <String>[];
+    final links = <String>[];
+    const source = 'https://example.test/original?topic=1#section';
+    messenger.setMockMethodCallHandler(SystemChannels.platform, (call) async {
+      if (call.method != 'Clipboard.setData') return null;
+      clipboard.add((call.arguments as Map)['text'] as String);
+      if (clipboard.length == 2) {
+        throw PlatformException(code: 'clipboard_busy');
+      }
+      return null;
+    });
+    messenger.setMockMethodCallHandler(launcher, (call) async {
+      links.add((call.arguments as Map)['url'] as String);
+      if (links.length == 3) throw PlatformException(code: 'launch_failed');
+      return links.length == 1;
+    });
+    addTearDown(() {
+      messenger.setMockMethodCallHandler(SystemChannels.platform, null);
+      messenger.setMockMethodCallHandler(launcher, null);
+    });
+
+    final log = MemoryAuditLog();
+    final app = AppController(
+      config: AppConfig.initial(),
+      store: NoDiskConfig(),
+      secrets: MemorySecrets(),
+      log: log,
+    );
+    app.records.add(
+      RequestRecord(
+        question: const Question(title: '带来源的题目'),
+        model: 'M',
+        time: DateTime.now(),
+        duration: Duration.zero,
+        result: const AnswerResult(
+          answers: ['答案'],
+          explanation: '',
+          sources: [source],
+        ),
+      ),
+    );
+    await tester.pumpWidget(BridgeApp(app: app));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('OCS 接入').first);
+    await tester.pumpAndSettle();
+    for (var attempt = 0; attempt < 2; attempt++) {
+      await tester.tap(find.text('复制配置'));
+      await tester.pumpAndSettle();
+    }
+    expect(clipboard, [app.wrapperJson, app.wrapperJson]);
+
+    Iterable<Map> entries(String event) => log.events
+        .where((e) => e['event'] == event)
+        .map((e) => e['data'] as Map);
+    expect(entries('ocs.config.copy.complete').single['text'], app.wrapperJson);
+    final copyError = entries('ocs.config.copy.error').single;
+    expect(copyError['text'], app.wrapperJson);
+    expect(copyError['error'], contains('clipboard_busy'));
+
+    await tester.tap(find.text('请求记录').first);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('带来源的题目'));
+    await tester.pumpAndSettle();
+    for (var attempt = 0; attempt < 3; attempt++) {
+      await tester.tap(find.widgetWithText(ActionChip, 'example.test'));
+      await tester.pumpAndSettle();
+    }
+    expect(links, [source, source, source]);
+    expect(entries('answer.source.open.complete'), [
+      {'url': source, 'opened': true},
+      {'url': source, 'opened': false},
+    ]);
+    final launchError = entries('answer.source.open.error').single;
+    expect(launchError['url'], source);
+    expect(launchError['opened'], false);
+    expect(launchError['error'], contains('launch_failed'));
+    expect(tester.takeException(), isNull);
+    app.dispose();
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
   testWidgets(
     'history exports all or single records through the shared format dialog',
     (tester) async {

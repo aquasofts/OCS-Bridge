@@ -282,3 +282,35 @@ Map<String, dynamic>? logConnection(HttpConnectionInfo? info) => info == null
         'remotePort': info.remotePort,
         'localPort': info.localPort,
       };
+
+Map<String, dynamic> logResponseMetadata(HttpClientResponse response) {
+  final certificate = response.certificate;
+  return {
+    'status': response.statusCode,
+    'reason': response.reasonPhrase,
+    'headers': logHeaders(response.headers),
+    'contentLength': response.contentLength,
+    'compressionState': response.compressionState.name,
+    'persistentConnection': response.persistentConnection,
+    'isRedirect': response.isRedirect,
+    'redirects': response.redirects
+        .map(
+          (r) => {
+            'status': r.statusCode,
+            'method': r.method,
+            'location': r.location.toString(),
+          },
+        )
+        .toList(),
+    'connection': logConnection(response.connectionInfo),
+    if (certificate != null)
+      'certificate': {
+        'subject': certificate.subject,
+        'issuer': certificate.issuer,
+        'startValidity': certificate.startValidity.toUtc().toIso8601String(),
+        'endValidity': certificate.endValidity.toUtc().toIso8601String(),
+        'pem': certificate.pem,
+        'der': base64Encode(certificate.der),
+      },
+  };
+}

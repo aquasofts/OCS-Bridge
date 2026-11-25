@@ -13,6 +13,8 @@ enum ApiProtocol { chat, responses }
 
 enum SearchMode { off, auto, required }
 
+enum CalculationMode { off, localPython, calculator, hostedPython }
+
 class ProviderConfig {
   const ProviderConfig({
     required this.id,
@@ -54,6 +56,7 @@ class ModelConfig {
     this.timeoutSeconds = 120,
     this.temperature,
     this.vision = false,
+    this.calculation = CalculationMode.off,
     this.extra = const {},
   });
   final String id, name, model, providerId, effort, thinking;
@@ -62,6 +65,11 @@ class ModelConfig {
   final int maxTokens, timeoutSeconds;
   final double? temperature;
   final bool vision;
+  final CalculationMode calculation;
+  bool get python => calculation == CalculationMode.hostedPython;
+  bool get usesLocalCalculation =>
+      calculation == CalculationMode.localPython ||
+      calculation == CalculationMode.calculator;
   final Map<String, dynamic> extra;
   Map<String, dynamic> toJson() => {
     'id': id,
@@ -76,6 +84,7 @@ class ModelConfig {
     'timeoutSeconds': timeoutSeconds,
     'temperature': temperature,
     'vision': vision,
+    'calculation': calculation.name,
     'extra': extra,
   };
   factory ModelConfig.fromJson(Map<String, dynamic> j) => ModelConfig(
@@ -91,6 +100,11 @@ class ModelConfig {
     timeoutSeconds: j['timeoutSeconds'] as int? ?? 120,
     temperature: (j['temperature'] as num?)?.toDouble(),
     vision: j['vision'] as bool? ?? false,
+    calculation: j['calculation'] is String
+        ? CalculationMode.values.byName(j['calculation'] as String)
+        : j['python'] == true
+        ? CalculationMode.hostedPython
+        : CalculationMode.off,
     extra: Map<String, dynamic>.from(j['extra'] as Map? ?? {}),
   );
 }
@@ -105,6 +119,8 @@ class AppConfig {
     this.darkMode = false,
     this.autoStart = false,
     this.cacheEnabled = true,
+    this.allowGuess = true,
+    this.agentMode = true,
   }) : providers = List<ProviderConfig>.of(providers),
        models = List<ModelConfig>.of(models);
   List<ProviderConfig> providers;
@@ -112,7 +128,7 @@ class AppConfig {
   String token;
   String? activeModelId;
   int port;
-  bool darkMode, autoStart, cacheEnabled;
+  bool darkMode, autoStart, cacheEnabled, allowGuess, agentMode;
   factory AppConfig.initial() => AppConfig(
     providers: const [
       ProviderConfig(
@@ -141,6 +157,8 @@ class AppConfig {
     'darkMode': darkMode,
     'autoStart': autoStart,
     'cacheEnabled': cacheEnabled,
+    'allowGuess': allowGuess,
+    'agentMode': agentMode,
   };
   factory AppConfig.fromJson(Map<String, dynamic> j) {
     if (j['version'] != 1) {
@@ -161,6 +179,8 @@ class AppConfig {
       darkMode: j['darkMode'] as bool? ?? false,
       autoStart: j['autoStart'] as bool? ?? false,
       cacheEnabled: j['cacheEnabled'] as bool? ?? true,
+      allowGuess: j['allowGuess'] as bool? ?? true,
+      agentMode: j['agentMode'] as bool? ?? true,
     );
     if (c.port < 1024 ||
         c.port > 65535 ||
@@ -204,12 +224,33 @@ void validateProvider(ProviderConfig p) {
   }
 }
 
+bool supportsHostedPython(ApiProtocol protocol, ProviderConfig provider) =>
+    protocol == ApiProtocol.responses &&
+    provider.supportsResponses &&
+    provider.kind != ProviderKind.deepseek;
+
+bool usesDeepSeekWebTools(ModelConfig model, ProviderConfig provider) =>
+    provider.kind == ProviderKind.deepseek && model.model == 'deepseek-flash';
+
+bool supportsHostedSearch(ModelConfig model, ProviderConfig provider) {
+  final responses = model.protocol == ApiProtocol.responses;
+  if (responses && !provider.supportsResponses) return false;
+  if (provider.kind == ProviderKind.deepseek) {
+    return usesDeepSeekWebTools(model, provider) ||
+        (responses && model.model == 'deepseek-v4-pro');
+  }
+  return responses || model.search != SearchMode.off;
+}
+
 void validateModel(ModelConfig m, ProviderConfig p) {
   if (m.name.trim().isEmpty || m.model.trim().isEmpty) {
     throw const FormatException('请填写模型名称和 ID');
   }
   if (m.protocol == ApiProtocol.responses && !p.supportsResponses) {
     throw const FormatException('供应商未启用 Responses');
+  }
+  if (m.python && !supportsHostedPython(m.protocol, p)) {
+    throw const FormatException('Python 计算需要支持代码解释器的 Responses 接口');
   }
   if (m.maxTokens < 64 ||
       m.maxTokens > 393216 ||
@@ -220,19 +261,16 @@ void validateModel(ModelConfig m, ProviderConfig p) {
   if (m.temperature != null && (m.temperature! < 0 || m.temperature! > 2)) {
     throw const FormatException('温度范围为 0–2');
   }
-  if (m.search != SearchMode.off &&
-      m.protocol != ApiProtocol.responses &&
-      p.kind == ProviderKind.deepseek) {
-    throw const FormatException('DeepSeek 搜索请使用 Responses');
-  }
   if (p.kind == ProviderKind.deepseek &&
       m.search != SearchMode.off &&
-      m.model != 'deepseek-v4-pro') {
-    throw const FormatException('DeepSeek 搜索请选择 deepseek-v4-pro');
+      !supportsHostedSearch(m, p)) {
+    throw const FormatException(
+      'DeepSeek 联网请选择 deepseek-flash 或 deepseek-v4-pro（Responses）',
+    );
   }
-  if (m.search != SearchMode.off &&
-      m.protocol == ApiProtocol.chat &&
-      m.search == SearchMode.required) {
+  if (m.protocol == ApiProtocol.chat &&
+      m.search == SearchMode.required &&
+      !usesDeepSeekWebTools(m, p)) {
     throw const FormatException('强制搜索请使用 Responses');
   }
   const reserved = {
